@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 import requests
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -23,6 +24,8 @@ DATA = ROOT / "data"
 WALLPAPERS = DATA / "wallpapers"
 DB = DATA / "memory.db"
 CONFIG_PATH = ROOT / "config.json"
+
+load_dotenv(ROOT / ".env")
 
 DATA.mkdir(exist_ok=True)
 WALLPAPERS.mkdir(exist_ok=True)

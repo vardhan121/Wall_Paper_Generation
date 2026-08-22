@@ -10,7 +10,7 @@ A privacy-first Chrome/Chromium extension that observes browser activity locally
 - The local backend stores only compact activity records and AI summaries in SQLite.
 - Browser metadata is sent to Groq for text inference.
 - The generated image prompt is sent to Hugging Face for image generation.
-- Set `GROQ_API_KEY` and `HUGGINGFACE_API_KEY` as environment variables; never commit them.
+- Keep `GROQ_API_KEY` and `HUGGINGFACE_API_KEY` in `backend/.env`; never commit that file.
 
 ## Requirements
 
@@ -31,12 +31,7 @@ pip install -r requirements.txt
 
 ## 2. Configure cloud providers
 
-PowerShell:
-
-```powershell
-$env:GROQ_API_KEY = "your-groq-key"
-$env:HUGGINGFACE_API_KEY = "your-huggingface-token"
-```
+Copy `backend/.env.example` to `backend/.env`, then replace both placeholder values with your keys. The backend loads this file automatically at startup, and `.gitignore` keeps it out of version control.
 
 The defaults use Groq's `llama-3.3-70b-versatile` model and Hugging Face's `black-forest-labs/FLUX.1-schnell`. Change these in `backend/config.json` when needed.
 
