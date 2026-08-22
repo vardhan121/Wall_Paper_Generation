@@ -254,6 +254,8 @@ async def groq_json(prompt: str) -> dict:
     payload = {
         "model": CFG["groq_model"],
         "response_format": {"type": "json_object"},
+        "temperature": 0.7,
+        "max_completion_tokens": 2048,
         "messages": [
             {
                 "role": "system",
@@ -265,17 +267,27 @@ async def groq_json(prompt: str) -> dict:
             },
             {"role": "user", "content": prompt},
         ],
-        "options": {"temperature": 0.7},
     }
 
     headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=180) as client:
         r = await client.post(url, headers=headers, json=payload)
-        r.raise_for_status()
+        if r.is_error and r.status_code == 400 and "json_validate_failed" in r.text:
+            payload.pop("response_format")
+            r = await client.post(url, headers=headers, json=payload)
+        if r.is_error:
+            raise RuntimeError(
+                f"Groq API error ({r.status_code}): {r.text[:500]}"
+            )
         data = r.json()
 
     content = data["choices"][0]["message"]["content"]
-    return json.loads(content)
+    try:
+        return json.loads(content)
+    except (TypeError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            f"Groq returned invalid JSON: {str(content)[:500]}"
+        ) from error
 
 
 def make_summary_prompt(activity, old_memory):
@@ -351,7 +363,11 @@ def huggingface_generate(prompt, negative):
         json=payload,
         timeout=300,
     )
-    response.raise_for_status()
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Hugging Face API error ({response.status_code}): "
+            f"{response.text[:500]}"
+        )
     if not response.headers.get("content-type", "").startswith("image/"):
         raise RuntimeError(
             "Hugging Face returned a non-image response: "
@@ -438,7 +454,13 @@ async def generate_wallpaper(force=False):
 
 @app.post("/api/generate")
 async def generate():
-    return await generate_wallpaper(force=True)
+    try:
+        return await generate_wallpaper(force=True)
+    except HTTPException:
+        raise
+    except Exception as error:
+        print("[generate] failed:", error)
+        raise HTTPException(502, f"Generation provider failed: {error}") from error
 
 
 async def scheduler():

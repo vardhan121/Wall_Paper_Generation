@@ -2,11 +2,11 @@
   "host": "127.0.0.1",
   "port": 8765,
   "groq_url": "https://api.groq.com/openai/v1",
-  "groq_model": "llama-3.3-70b-versatile",
-  "huggingface_url": "https://router.huggingface.co/hf-inference/models",
+  "groq_model": "openai/gpt-oss-20b",
+  "huggingface_url": "https://router.huggingface.co/nscale/models",
   "huggingface_image_model": "black-forest-labs/FLUX.1-schnell",
   "generation_interval_minutes": 30,
   "activity_window_hours": 24,
-  "wallpaper_width": 1920,
-  "wallpaper_height": 1080
+  "wallpaper_width": 1024,
+  "wallpaper_height": 576
 }
