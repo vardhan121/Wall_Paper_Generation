@@ -33,7 +33,7 @@ pip install -r requirements.txt
 
 Copy `backend/.env.example` to `backend/.env`, then replace both placeholder values with your keys. The backend loads this file automatically at startup, and `.gitignore` keeps it out of version control.
 
-The defaults use Groq's configured model and Hugging Face's `stabilityai/stable-diffusion-xl-base-1.0`. Change these in `backend/config.json` when needed.
+The defaults use Groq's configured model and Hugging Face's `stabilityai/stable-diffusion-3-medium-diffusers`. Change these in `backend/config.json` when needed.
 
 ## 3. Start the local backend
 
