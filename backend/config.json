@@ -1,0 +1,12 @@
+{
+  "host": "127.0.0.1",
+  "port": 8765,
+  "ollama_url": "http://127.0.0.1:11434",
+  "ollama_model": "llama3.2:3b",
+  "comfyui_url": "http://127.0.0.1:8188",
+  "comfyui_checkpoint": "YOUR_CHECKPOINT.safetensors",
+  "generation_interval_minutes": 30,
+  "activity_window_hours": 24,
+  "wallpaper_width": 1920,
+  "wallpaper_height": 1080
+}

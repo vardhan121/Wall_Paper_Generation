@@ -1,0 +1,529 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+import io
+import json
+import os
+import sqlite3
+import threading
+import time
+import uuid
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Any
+
+import httpx
+import requests
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
+from PIL import Image
+
+ROOT = Path(__file__).resolve().parent
+DATA = ROOT / "data"
+WALLPAPERS = DATA / "wallpapers"
+DB = DATA / "memory.db"
+CONFIG_PATH = ROOT / "config.json"
+
+DATA.mkdir(exist_ok=True)
+WALLPAPERS.mkdir(exist_ok=True)
+
+with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+    CFG = json.load(f)
+
+app = FastAPI(title="Memory Wallpaper Local Agent")
+
+# Only local extension/app clients should use this API.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["chrome-extension://*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+DB_LOCK = threading.Lock()
+
+
+def db():
+    conn = sqlite3.connect(DB, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db():
+    with DB_LOCK:
+        conn = db()
+        conn.executescript("""
+        CREATE TABLE IF NOT EXISTS activity (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts REAL NOT NULL,
+            url TEXT NOT NULL,
+            domain TEXT NOT NULL,
+            title TEXT NOT NULL,
+            duration_seconds INTEGER NOT NULL DEFAULT 0
+        );
+
+        CREATE TABLE IF NOT EXISTS memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL NOT NULL,
+            summary TEXT NOT NULL,
+            visual_memory TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS generations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at REAL NOT NULL,
+            prompt TEXT NOT NULL,
+            image_path TEXT NOT NULL
+        );
+        """)
+        conn.commit()
+        conn.close()
+
+
+init_db()
+
+
+class Activity(BaseModel):
+    url: str = Field(max_length=2048)
+    domain: str = Field(max_length=512)
+    title: str = Field(max_length=1000)
+    started_at: float
+    duration_seconds: int = Field(default=0, ge=0, le=86400)
+
+
+class ActivityBatch(BaseModel):
+    events: list[Activity] = Field(max_length=200)
+
+
+def now():
+    return time.time()
+
+
+def recent_activity(hours: int) -> list[dict[str, Any]]:
+    cutoff = now() - hours * 3600
+    with DB_LOCK:
+        conn = db()
+        rows = conn.execute(
+            "SELECT * FROM activity WHERE ts >= ? ORDER BY ts ASC", (cutoff,)
+        ).fetchall()
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def all_visual_memory() -> list[dict[str, Any]]:
+    with DB_LOCK:
+        conn = db()
+        rows = conn.execute(
+            "SELECT * FROM memories ORDER BY created_at ASC"
+        ).fetchall()
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def last_generation_time():
+    with DB_LOCK:
+        conn = db()
+        row = conn.execute(
+            "SELECT created_at FROM generations ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+    return row["created_at"] if row else 0
+
+
+def activity_since(ts: float) -> list[dict[str, Any]]:
+    with DB_LOCK:
+        conn = db()
+        rows = conn.execute(
+            "SELECT * FROM activity WHERE ts > ? ORDER BY ts ASC", (ts,)
+        ).fetchall()
+        conn.close()
+    return [dict(r) for r in rows]
+
+
+def sanitize_activity(events: list[Activity]):
+    cleaned = []
+    for e in events:
+        # Keep metadata only. Do not store query strings/fragments.
+        try:
+            from urllib.parse import urlsplit, urlunsplit
+            p = urlsplit(e.url)
+            safe_url = urlunsplit((p.scheme, p.netloc, p.path, "", ""))
+        except Exception:
+            safe_url = e.url.split("?", 1)[0].split("#", 1)[0]
+
+        cleaned.append({
+            "ts": float(e.started_at),
+            "url": safe_url[:2048],
+            "domain": e.domain[:512],
+            "title": e.title[:1000],
+            "duration_seconds": int(e.duration_seconds),
+        })
+    return cleaned
+
+
+@app.get("/api/health")
+def health():
+    return {
+        "ok": True,
+        "ollama": CFG["ollama_url"],
+        "comfyui": CFG["comfyui_url"],
+    }
+
+
+@app.get("/api/stats")
+def stats():
+    with DB_LOCK:
+        conn = db()
+        activity_count = conn.execute("SELECT COUNT(*) c FROM activity").fetchone()["c"]
+        memory_count = conn.execute("SELECT COUNT(*) c FROM memories").fetchone()["c"]
+        generation_count = conn.execute("SELECT COUNT(*) c FROM generations").fetchone()["c"]
+        conn.close()
+    return {
+        "activity_count": activity_count,
+        "memory_count": memory_count,
+        "generation_count": generation_count,
+        "last_generation": last_generation_time(),
+    }
+
+
+@app.get("/api/memory")
+def memory():
+    return all_visual_memory()
+
+
+@app.post("/api/activity")
+def receive_activity(batch: ActivityBatch):
+    events = sanitize_activity(batch.events)
+    if not events:
+        return {"accepted": 0}
+
+    with DB_LOCK:
+        conn = db()
+        conn.executemany(
+            """INSERT INTO activity(ts,url,domain,title,duration_seconds)
+               VALUES(?,?,?,?,?)""",
+            [
+                (
+                    e["ts"], e["url"], e["domain"],
+                    e["title"], e["duration_seconds"]
+                )
+                for e in events
+            ],
+        )
+        conn.commit()
+        conn.close()
+
+    return {"accepted": len(events)}
+
+
+def compact_activity(events):
+    # The model receives metadata, not raw page contents.
+    by_domain = {}
+    for e in events:
+        d = e["domain"]
+        by_domain.setdefault(d, {"seconds": 0, "titles": []})
+        by_domain[d]["seconds"] += e["duration_seconds"]
+        if e["title"] and e["title"] not in by_domain[d]["titles"]:
+            by_domain[d]["titles"].append(e["title"][:180])
+
+    return [
+        {
+            "domain": domain,
+            "minutes": round(v["seconds"] / 60, 1),
+            "titles": v["titles"][:8],
+        }
+        for domain, v in sorted(
+            by_domain.items(),
+            key=lambda x: x[1]["seconds"],
+            reverse=True,
+        )
+    ][:50]
+
+
+async def ollama_json(prompt: str) -> dict:
+    url = CFG["ollama_url"].rstrip("/") + "/api/chat"
+    payload = {
+        "model": CFG["ollama_model"],
+        "stream": False,
+        "format": "json",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a privacy-first personal visual-memory engine. "
+                    "You only receive browser metadata. Never claim to know "
+                    "private page contents. Return strict JSON."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "options": {"temperature": 0.7},
+    }
+
+    async with httpx.AsyncClient(timeout=180) as client:
+        r = await client.post(url, json=payload)
+        r.raise_for_status()
+        data = r.json()
+
+    content = data["message"]["content"]
+    return json.loads(content)
+
+
+def make_summary_prompt(activity, old_memory):
+    return f"""
+Analyze this browser session metadata.
+
+RECENT ACTIVITY:
+{json.dumps(activity, ensure_ascii=False, indent=2)}
+
+EXISTING VISUAL MEMORY:
+{json.dumps(old_memory[-12:], ensure_ascii=False, indent=2)}
+
+Return JSON with exactly these fields:
+{{
+  "summary": "2-4 sentence summary of what the user explored",
+  "topics": ["..."],
+  "projects": ["..."],
+  "visual_motifs": ["..."],
+  "mood": "short phrase",
+  "new_world_elements": ["..."],
+  "preserve_elements": ["..."]
+}}
+
+Rules:
+- Infer cautiously from domains and titles.
+- Do not invent personal facts.
+- Keep visual motifs concrete.
+- preserve_elements should reference broad visual continuity, not sensitive data.
+"""
+
+
+def make_image_prompt(summary_obj, old_memory):
+    return f"""
+Create a cinematic desktop wallpaper prompt from a user's evolving visual memory.
+
+CURRENT MEMORY:
+{json.dumps(summary_obj, ensure_ascii=False, indent=2)}
+
+PREVIOUS MEMORY:
+{json.dumps(old_memory[-8:], ensure_ascii=False, indent=2)}
+
+The image should feel like ONE persistent world that has evolved, not a collage.
+Blend today's interests into the existing world.
+No text, letters, UI, logos, watermarks, readable screens, or recognizable copyrighted
+characters. Use symbolic visual metaphors rather than literal browser screenshots.
+
+Return JSON:
+{{
+  "prompt": "one detailed positive image prompt",
+  "negative_prompt": "one detailed negative prompt"
+}}
+"""
+
+
+def comfy_workflow(prompt, negative, seed):
+    # Basic ComfyUI API workflow. Adapt checkpoint/node names for the installed setup.
+    return {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": seed,
+                "steps": 28,
+                "cfg": 7.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise": 1.0,
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["5", 0]
+            }
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": CFG["comfyui_checkpoint"]}
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {
+                "width": CFG["wallpaper_width"],
+                "height": CFG["wallpaper_height"],
+                "batch_size": 1
+            }
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": prompt, "clip": ["4", 1]}
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"text": negative, "clip": ["4", 1]}
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["4", 2]}
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "memory_wallpaper", "images": ["8", 0]}
+        }
+    }
+
+
+def comfy_generate(prompt, negative):
+    base = CFG["comfyui_url"].rstrip("/")
+    seed = int.from_bytes(os.urandom(8), "big") % (2**31 - 1)
+    workflow = comfy_workflow(prompt, negative, seed)
+
+    r = requests.post(
+        base + "/prompt",
+        json={"prompt": workflow, "client_id": str(uuid.uuid4())},
+        timeout=30,
+    )
+    r.raise_for_status()
+    prompt_id = r.json()["prompt_id"]
+
+    for _ in range(240):
+        time.sleep(1)
+        h = requests.get(base + "/history/" + prompt_id, timeout=30)
+        h.raise_for_status()
+        history = h.json()
+        if prompt_id not in history:
+            continue
+
+        outputs = history[prompt_id].get("outputs", {})
+        for node in outputs.values():
+            for image in node.get("images", []):
+                filename = image["filename"]
+                subfolder = image.get("subfolder", "")
+                folder_type = image.get("type", "output")
+                params = {
+                    "filename": filename,
+                    "subfolder": subfolder,
+                    "type": folder_type,
+                }
+                img_resp = requests.get(
+                    base + "/view", params=params, timeout=60
+                )
+                img_resp.raise_for_status()
+                return img_resp.content
+
+    raise TimeoutError("ComfyUI image generation timed out.")
+
+
+def set_windows_wallpaper(path: Path):
+    import ctypes
+    SPI_SETDESKWALLPAPER = 20
+    SPIF_UPDATEINIFILE = 0x01
+    SPIF_SENDCHANGE = 0x02
+
+    result = ctypes.windll.user32.SystemParametersInfoW(
+        SPI_SETDESKWALLPAPER,
+        0,
+        str(path),
+        SPIF_UPDATEINIFILE | SPIF_SENDCHANGE,
+    )
+    if not result:
+        raise OSError("Windows refused to set the wallpaper.")
+
+
+async def generate_wallpaper(force=False):
+    last = last_generation_time()
+    since = last if last else now() - CFG["activity_window_hours"] * 3600
+    events = activity_since(since)
+
+    if not events:
+        raise HTTPException(400, "No new browser activity since the last generation.")
+
+    compact = compact_activity(events)
+    old = all_visual_memory()
+
+    summary = await ollama_json(make_summary_prompt(compact, old))
+    visual = await ollama_json(make_image_prompt(summary, old))
+
+    image_bytes = comfy_generate(
+        visual["prompt"],
+        visual.get("negative_prompt", "text, watermark, logo, UI, blurry"),
+    )
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    path = WALLPAPERS / f"wallpaper_{stamp}.png"
+    path.write_bytes(image_bytes)
+
+    # Validate the image before applying it.
+    with Image.open(io.BytesIO(image_bytes)) as im:
+        im.verify()
+
+    with DB_LOCK:
+        conn = db()
+        conn.execute(
+            "INSERT INTO memories(created_at,summary,visual_memory) VALUES(?,?,?)",
+            (
+                now(),
+                summary.get("summary", ""),
+                json.dumps(
+                    {
+                        **summary,
+                        "generated_prompt": visual["prompt"],
+                    },
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        conn.execute(
+            "INSERT INTO generations(created_at,prompt,image_path) VALUES(?,?,?)",
+            (now(), visual["prompt"], str(path)),
+        )
+        conn.commit()
+        conn.close()
+
+    if os.name == "nt":
+        set_windows_wallpaper(path)
+
+    return {
+        "summary": summary,
+        "visual_prompt": visual["prompt"],
+        "image_path": str(path),
+    }
+
+
+@app.post("/api/generate")
+async def generate():
+    return await generate_wallpaper(force=True)
+
+
+async def scheduler():
+    while True:
+        try:
+            minutes = CFG["generation_interval_minutes"]
+            cutoff = last_generation_time() or (now() - minutes * 60)
+            new_events = activity_since(cutoff)
+            total_seconds = sum(e["duration_seconds"] for e in new_events)
+
+            if total_seconds >= minutes * 60:
+                try:
+                    await generate_wallpaper()
+                except Exception as e:
+                    print("[scheduler] generation failed:", e)
+        except Exception as e:
+            print("[scheduler] error:", e)
+
+        await asyncio.sleep(60)
+
+
+@app.on_event("startup")
+async def startup():
+    asyncio.create_task(scheduler())
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "server:app",
+        host=CFG["host"],
+        port=CFG["port"],
+        reload=False,
+    )
