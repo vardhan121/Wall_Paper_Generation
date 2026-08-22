@@ -336,9 +336,19 @@ characters. Use symbolic visual metaphors rather than literal browser screenshot
 
 Return JSON:
 {{
-  "prompt": "one detailed positive image prompt",
+    "statements": [
+        "statement 1: the main environment or composition",
+        "statement 2: the visual subjects, motifs, and colors",
+        "statement 3: the cinematic lighting, style, and atmosphere"
+    ],
   "negative_prompt": "one detailed negative prompt"
 }}
+
+Rules:
+- Return exactly 3 statements.
+- Each statement must be one concise sentence of at most 25 words.
+- The three statements must describe one coherent image, not separate scenes.
+- Do not include text, letters, logos, UI, watermarks, or copyrighted characters.
 """
 
 
@@ -406,8 +416,15 @@ async def generate_wallpaper(force=False):
     summary = await groq_json(make_summary_prompt(compact, old))
     visual = await groq_json(make_image_prompt(summary, old))
 
+    statements = visual.get("statements")
+    if not isinstance(statements, list) or len(statements) != 3:
+        raise RuntimeError("Groq must return exactly 3 image prompt statements.")
+    if not all(isinstance(statement, str) and statement.strip() for statement in statements):
+        raise RuntimeError("Groq returned an invalid image prompt statement.")
+
+    image_prompt = " ".join(statement.strip() for statement in statements)
     image_bytes = huggingface_generate(
-        visual["prompt"],
+        image_prompt,
         visual.get("negative_prompt", "text, watermark, logo, UI, blurry"),
     )
 
@@ -429,7 +446,7 @@ async def generate_wallpaper(force=False):
                 json.dumps(
                     {
                         **summary,
-                        "generated_prompt": visual["prompt"],
+                        "generated_prompt": image_prompt,
                     },
                     ensure_ascii=False,
                 ),
@@ -437,7 +454,7 @@ async def generate_wallpaper(force=False):
         )
         conn.execute(
             "INSERT INTO generations(created_at,prompt,image_path) VALUES(?,?,?)",
-            (now(), visual["prompt"], str(path)),
+            (now(), image_prompt, str(path)),
         )
         conn.commit()
         conn.close()
@@ -447,7 +464,7 @@ async def generate_wallpaper(force=False):
 
     return {
         "summary": summary,
-        "visual_prompt": visual["prompt"],
+        "visual_prompt": image_prompt,
         "image_path": str(path),
     }
 
