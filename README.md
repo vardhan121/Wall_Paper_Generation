@@ -1,6 +1,6 @@
 # Memory Wallpaper
 
-A privacy-first Chrome/Chromium extension that observes browser activity locally, summarizes the user's session with a local Ollama model, maintains a local SQLite memory, generates an evolving wallpaper through a local ComfyUI server, and applies it on Windows.
+A privacy-first Chrome/Chromium extension that observes browser activity locally, summarizes the user's session with Groq, maintains a local SQLite memory, generates an evolving wallpaper through a hosted Hugging Face image model, and applies it on Windows.
 
 ## Privacy model
 
@@ -8,17 +8,17 @@ A privacy-first Chrome/Chromium extension that observes browser activity locally
 - The extension records metadata only: URL, domain, title, timestamps, active-tab duration, and browser idle state.
 - No page body, form input, cookies, passwords, downloads, or keystrokes are collected.
 - The local backend stores only compact activity records and AI summaries in SQLite.
-- AI inference is local through Ollama.
-- Image generation is local through ComfyUI.
-- Nothing in this project requires a cloud API.
+- Browser metadata is sent to Groq for text inference.
+- The generated image prompt is sent to Hugging Face for image generation.
+- Set `GROQ_API_KEY` and `HUGGINGFACE_API_KEY` as environment variables; never commit them.
 
 ## Requirements
 
 - Windows 10/11
 - Chrome or Chromium-based browser
 - Python 3.11+
-- Ollama installed locally with a chat model, e.g. `llama3.2:3b`
-- ComfyUI running locally with an SDXL/SD1.5-compatible checkpoint
+- Groq API access and a Groq API key
+- Hugging Face API access and a Hugging Face token with inference permissions
 
 ## 1. Install Python dependencies
 
@@ -29,29 +29,18 @@ py -m venv .venv
 pip install -r requirements.txt
 ```
 
-## 2. Start Ollama
+## 2. Configure cloud providers
 
-Install Ollama, then:
+PowerShell:
 
 ```powershell
-ollama pull llama3.2:3b
+$env:GROQ_API_KEY = "your-groq-key"
+$env:HUGGINGFACE_API_KEY = "your-huggingface-token"
 ```
 
-The backend defaults to `http://127.0.0.1:11434`.
+The defaults use Groq's `llama-3.3-70b-versatile` model and Hugging Face's `black-forest-labs/FLUX.1-schnell`. Change these in `backend/config.json` when needed.
 
-## 3. Start ComfyUI
-
-Run ComfyUI locally on:
-
-`http://127.0.0.1:8188`
-
-Put a model checkpoint into ComfyUI's `models/checkpoints` directory.
-
-Then edit `backend/config.json` and set `comfyui_checkpoint` to the exact checkpoint filename.
-
-The included workflow uses a basic txt2img graph and should be adapted if your ComfyUI checkpoint/node setup differs.
-
-## 4. Start the local backend
+## 3. Start the local backend
 
 ```powershell
 python server.py
@@ -80,10 +69,10 @@ Invoke-RestMethod http://127.0.0.1:8765/api/generate -Method POST
 ```
 
 The backend will:
-1. summarize recent activity
+1. summarize recent activity with Groq
 2. merge the summary into long-term visual memory
 3. build a prompt
-4. ask local ComfyUI to generate the image
+4. ask Hugging Face to generate the image
 5. save it under `backend/data/wallpapers`
 6. set it as the Windows desktop wallpaper
 
@@ -118,6 +107,6 @@ This project intentionally binds the backend to `127.0.0.1`. For a real release:
 - add extension-to-server authentication with a locally generated secret
 - encrypt sensitive local state if needed
 - provide a pause/delete-memory UI
-- use a proper ComfyUI workflow tailored to the installed checkpoint
+- choose a Hugging Face image model suited to the desired wallpaper style
 - add signed installer/update infrastructure
 - consider native messaging instead of a localhost API if stronger browser-to-app isolation is required

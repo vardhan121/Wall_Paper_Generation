@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import json
 import os
 import sqlite3
 import threading
 import time
-import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
@@ -168,8 +166,9 @@ def sanitize_activity(events: list[Activity]):
 def health():
     return {
         "ok": True,
-        "ollama": CFG["ollama_url"],
-        "comfyui": CFG["comfyui_url"],
+        "groq": CFG["groq_url"],
+        "huggingface": CFG["huggingface_url"],
+        "huggingface_image_model": CFG["huggingface_image_model"],
     }
 
 
@@ -243,12 +242,15 @@ def compact_activity(events):
     ][:50]
 
 
-async def ollama_json(prompt: str) -> dict:
-    url = CFG["ollama_url"].rstrip("/") + "/api/chat"
+async def groq_json(prompt: str) -> dict:
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY is not set.")
+
+    url = CFG["groq_url"].rstrip("/") + "/chat/completions"
     payload = {
-        "model": CFG["ollama_model"],
-        "stream": False,
-        "format": "json",
+        "model": CFG["groq_model"],
+        "response_format": {"type": "json_object"},
         "messages": [
             {
                 "role": "system",
@@ -263,12 +265,13 @@ async def ollama_json(prompt: str) -> dict:
         "options": {"temperature": 0.7},
     }
 
+    headers = {"Authorization": f"Bearer {api_key}"}
     async with httpx.AsyncClient(timeout=180) as client:
-        r = await client.post(url, json=payload)
+        r = await client.post(url, headers=headers, json=payload)
         r.raise_for_status()
         data = r.json()
 
-    content = data["message"]["content"]
+    content = data["choices"][0]["message"]["content"]
     return json.loads(content)
 
 
@@ -324,94 +327,34 @@ Return JSON:
 """
 
 
-def comfy_workflow(prompt, negative, seed):
-    # Basic ComfyUI API workflow. Adapt checkpoint/node names for the installed setup.
-    return {
-        "3": {
-            "class_type": "KSampler",
-            "inputs": {
-                "seed": seed,
-                "steps": 28,
-                "cfg": 7.0,
-                "sampler_name": "euler",
-                "scheduler": "normal",
-                "denoise": 1.0,
-                "model": ["4", 0],
-                "positive": ["6", 0],
-                "negative": ["7", 0],
-                "latent_image": ["5", 0]
-            }
+def huggingface_generate(prompt, negative):
+    api_key = os.environ.get("HUGGINGFACE_API_KEY")
+    if not api_key:
+        raise RuntimeError("HUGGINGFACE_API_KEY is not set.")
+
+    model = CFG["huggingface_image_model"]
+    url = CFG["huggingface_url"].rstrip("/") + "/" + model
+    payload = {
+        "inputs": prompt,
+        "parameters": {
+            "negative_prompt": negative,
+            "width": CFG["wallpaper_width"],
+            "height": CFG["wallpaper_height"],
         },
-        "4": {
-            "class_type": "CheckpointLoaderSimple",
-            "inputs": {"ckpt_name": CFG["comfyui_checkpoint"]}
-        },
-        "5": {
-            "class_type": "EmptyLatentImage",
-            "inputs": {
-                "width": CFG["wallpaper_width"],
-                "height": CFG["wallpaper_height"],
-                "batch_size": 1
-            }
-        },
-        "6": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": prompt, "clip": ["4", 1]}
-        },
-        "7": {
-            "class_type": "CLIPTextEncode",
-            "inputs": {"text": negative, "clip": ["4", 1]}
-        },
-        "8": {
-            "class_type": "VAEDecode",
-            "inputs": {"samples": ["3", 0], "vae": ["4", 2]}
-        },
-        "9": {
-            "class_type": "SaveImage",
-            "inputs": {"filename_prefix": "memory_wallpaper", "images": ["8", 0]}
-        }
     }
-
-
-def comfy_generate(prompt, negative):
-    base = CFG["comfyui_url"].rstrip("/")
-    seed = int.from_bytes(os.urandom(8), "big") % (2**31 - 1)
-    workflow = comfy_workflow(prompt, negative, seed)
-
-    r = requests.post(
-        base + "/prompt",
-        json={"prompt": workflow, "client_id": str(uuid.uuid4())},
-        timeout=30,
+    response = requests.post(
+        url,
+        headers={"Authorization": f"Bearer {api_key}"},
+        json=payload,
+        timeout=300,
     )
-    r.raise_for_status()
-    prompt_id = r.json()["prompt_id"]
-
-    for _ in range(240):
-        time.sleep(1)
-        h = requests.get(base + "/history/" + prompt_id, timeout=30)
-        h.raise_for_status()
-        history = h.json()
-        if prompt_id not in history:
-            continue
-
-        outputs = history[prompt_id].get("outputs", {})
-        for node in outputs.values():
-            for image in node.get("images", []):
-                filename = image["filename"]
-                subfolder = image.get("subfolder", "")
-                folder_type = image.get("type", "output")
-                params = {
-                    "filename": filename,
-                    "subfolder": subfolder,
-                    "type": folder_type,
-                }
-                img_resp = requests.get(
-                    base + "/view", params=params, timeout=60
-                )
-                img_resp.raise_for_status()
-                return img_resp.content
-
-    raise TimeoutError("ComfyUI image generation timed out.")
+    response.raise_for_status()
+    if not response.headers.get("content-type", "").startswith("image/"):
+        raise RuntimeError(
+            "Hugging Face returned a non-image response: "
+            + response.text[:500]
+        )
+    return response.content
 
 
 def set_windows_wallpaper(path: Path):
@@ -441,10 +384,10 @@ async def generate_wallpaper(force=False):
     compact = compact_activity(events)
     old = all_visual_memory()
 
-    summary = await ollama_json(make_summary_prompt(compact, old))
-    visual = await ollama_json(make_image_prompt(summary, old))
+    summary = await groq_json(make_summary_prompt(compact, old))
+    visual = await groq_json(make_image_prompt(summary, old))
 
-    image_bytes = comfy_generate(
+    image_bytes = huggingface_generate(
         visual["prompt"],
         visual.get("negative_prompt", "text, watermark, logo, UI, blurry"),
     )
