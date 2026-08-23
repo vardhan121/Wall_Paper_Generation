@@ -97,9 +97,16 @@ The database keeps only the latest 500 activity records, 20 visual memories, and
 - `GET /api/health`
 - `GET /api/stats`
 - `GET /api/memory`
+- `GET /api/memory/tokens` — estimated token usage for stored memory text
 - `POST /api/activity`
 - `POST /api/generate`
 - `GET /api/wallpaper/latest`
+
+To inspect memory token usage after restarting the backend:
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8765/api/memory/tokens
+```
 
 ## Demo
 
