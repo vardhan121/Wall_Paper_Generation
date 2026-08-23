@@ -55,7 +55,20 @@ Enable **Developer mode** → **Load unpacked** → choose the `extension` folde
 
 Pin the extension.
 
-## 6. Generate your first wallpaper
+## 6. Run the frontend dashboard
+
+In a second terminal:
+
+```powershell
+cd frontend
+npm install
+npm run dev
+```
+
+Open `http://localhost:3000` to view activity counts, visual memory, and the
+latest generated wallpaper. Keep the local backend running on port `8765`.
+
+## 7. Generate your first wallpaper
 
 After browsing for a while:
 
@@ -71,11 +84,13 @@ The backend will:
 5. save it under `backend/data/wallpapers`
 6. set it as the Windows desktop wallpaper
 
-## 7. Automatic generation
+## 8. Automatic generation
 
 The backend runs a background loop. By default it generates after 30 minutes of accumulated new browsing activity, then waits until there is another 30 minutes of new activity.
 
 Change this in `config.json`.
+
+The database keeps only the latest 500 activity records, 20 visual memories, and 10 generations. Older generated wallpaper files are deleted automatically. SQLite reuses deleted space; run `VACUUM` once if an existing database file needs to shrink physically.
 
 ## API
 
@@ -84,6 +99,7 @@ Change this in `config.json`.
 - `GET /api/memory`
 - `POST /api/activity`
 - `POST /api/generate`
+- `GET /api/wallpaper/latest`
 
 ## Demo
 

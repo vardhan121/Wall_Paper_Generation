@@ -7,6 +7,9 @@
   "huggingface_image_model": "stabilityai/stable-diffusion-3-medium-diffusers",
   "generation_interval_minutes": 30,
   "activity_window_hours": 24,
+  "max_activity_records": 200,
+  "max_memory_records": 20,
+  "max_generation_records": 10,
   "wallpaper_width": 1536,
   "wallpaper_height": 864
 }

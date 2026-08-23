@@ -15,6 +15,7 @@ import httpx
 import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from PIL import Image
@@ -38,7 +39,7 @@ app = FastAPI(title="Memory Wallpaper Local Agent")
 # Only local extension/app clients should use this API.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["chrome-extension://*"],
+    allow_origin_regex=r"^(chrome-extension://.*|http://localhost:3000|http://127\.0\.0\.1:3000)$",
     allow_credentials=False,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -124,6 +125,45 @@ def all_visual_memory() -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def prune_retained_data(conn):
+    activity_limit = int(CFG["max_activity_records"])
+    memory_limit = int(CFG["max_memory_records"])
+    generation_limit = int(CFG["max_generation_records"])
+
+    conn.execute(
+        "DELETE FROM activity WHERE id NOT IN "
+        "(SELECT id FROM activity ORDER BY ts DESC LIMIT ?)",
+        (activity_limit,),
+    )
+    conn.execute(
+        "DELETE FROM memories WHERE id NOT IN "
+        "(SELECT id FROM memories ORDER BY created_at DESC LIMIT ?)",
+        (memory_limit,),
+    )
+
+    old_paths = conn.execute(
+        "SELECT image_path FROM generations WHERE id NOT IN "
+        "(SELECT id FROM generations ORDER BY created_at DESC LIMIT ?)",
+        (generation_limit,),
+    ).fetchall()
+    conn.execute(
+        "DELETE FROM generations WHERE id NOT IN "
+        "(SELECT id FROM generations ORDER BY created_at DESC LIMIT ?)",
+        (generation_limit,),
+    )
+    return [Path(row["image_path"]) for row in old_paths]
+
+
+def delete_old_wallpapers(paths):
+    for path in paths:
+        try:
+            path.resolve().relative_to(WALLPAPERS.resolve())
+        except ValueError:
+            continue
+        if path.is_file():
+            path.unlink()
+
+
 def last_generation_time():
     with DB_LOCK:
         conn = db()
@@ -196,6 +236,20 @@ def memory():
     return all_visual_memory()
 
 
+@app.get("/api/wallpaper/latest")
+def latest_wallpaper():
+    with DB_LOCK:
+        conn = db()
+        row = conn.execute(
+            "SELECT image_path FROM generations ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+    if not row or not Path(row["image_path"]).is_file():
+        raise HTTPException(404, "No wallpaper has been generated yet.")
+    return FileResponse(row["image_path"], media_type="image/png")
+
+
 @app.post("/api/activity")
 def receive_activity(batch: ActivityBatch):
     events = sanitize_activity(batch.events)
@@ -215,6 +269,7 @@ def receive_activity(batch: ActivityBatch):
                 for e in events
             ],
         )
+        prune_retained_data(conn)
         conn.commit()
         conn.close()
 
@@ -456,8 +511,11 @@ async def generate_wallpaper(force=False):
             "INSERT INTO generations(created_at,prompt,image_path) VALUES(?,?,?)",
             (now(), image_prompt, str(path)),
         )
+        old_wallpapers = prune_retained_data(conn)
         conn.commit()
         conn.close()
+
+    delete_old_wallpapers(old_wallpapers)
 
     if os.name == "nt":
         set_windows_wallpaper(path)
