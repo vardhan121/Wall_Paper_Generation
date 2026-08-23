@@ -125,6 +125,61 @@ def all_visual_memory() -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+def latest_memory_keywords() -> list[str]:
+    with DB_LOCK:
+        conn = db()
+        row = conn.execute(
+            "SELECT visual_memory FROM memories ORDER BY created_at DESC LIMIT 1"
+        ).fetchone()
+        conn.close()
+
+    if not row:
+        return []
+
+    try:
+        visual_memory = json.loads(row["visual_memory"])
+    except (TypeError, json.JSONDecodeError):
+        return []
+
+    keywords = visual_memory.get("keywords", [])
+    if not isinstance(keywords, list):
+        return []
+    return [keyword.strip() for keyword in keywords if isinstance(keyword, str) and keyword.strip()]
+
+
+def estimate_tokens(text: str) -> int:
+    """Estimate tokens without downloading a model-specific tokenizer."""
+    return max(0, round(len(text) / 4))
+
+
+def memory_token_stats() -> dict[str, Any]:
+    rows = all_visual_memory()
+    details = []
+    total_characters = 0
+    total_tokens = 0
+
+    for row in rows:
+        text = f'{row["summary"]}\n{row["visual_memory"]}'
+        characters = len(text)
+        tokens = estimate_tokens(text)
+        total_characters += characters
+        total_tokens += tokens
+        details.append({
+            "id": row["id"],
+            "created_at": row["created_at"],
+            "characters": characters,
+            "estimated_tokens": tokens,
+        })
+
+    return {
+        "memory_count": len(rows),
+        "total_characters": total_characters,
+        "estimated_tokens": total_tokens,
+        "method": "approximately 1 token per 4 characters; model tokenizer may differ",
+        "rows": details,
+    }
+
+
 def prune_retained_data(conn):
     activity_limit = int(CFG["max_activity_records"])
     memory_limit = int(CFG["max_memory_records"])
@@ -236,6 +291,11 @@ def memory():
     return all_visual_memory()
 
 
+@app.get("/api/memory/tokens")
+def memory_tokens():
+    return memory_token_stats()
+
+
 @app.get("/api/wallpaper/latest")
 def latest_wallpaper():
     with DB_LOCK:
@@ -300,6 +360,20 @@ def compact_activity(events):
     ][:50]
 
 
+def observed_search_terms(activity):
+    terms = []
+    normalized = set()
+    for group in activity:
+        for title in group.get("titles", []):
+            marker = " - Google Search"
+            if marker.lower() in title.lower():
+                term = title[:title.lower().index(marker.lower())].strip(" -")
+                if term and term.lower() not in normalized:
+                    terms.append(term)
+                    normalized.add(term.lower())
+    return terms[:6]
+
+
 async def groq_json(prompt: str) -> dict:
     api_key = os.environ.get("GROQ_API_KEY")
     if not api_key:
@@ -309,8 +383,9 @@ async def groq_json(prompt: str) -> dict:
     payload = {
         "model": CFG["groq_model"],
         "response_format": {"type": "json_object"},
-        "temperature": 0.7,
-        "max_completion_tokens": 2048,
+        "temperature": 0.2,
+        "reasoning_effort": "low",
+        "max_completion_tokens": 256,
         "messages": [
             {
                 "role": "system",
@@ -336,75 +411,49 @@ async def groq_json(prompt: str) -> dict:
             )
         data = r.json()
 
-    content = data["choices"][0]["message"]["content"]
+    choice = data["choices"][0]
+    content = choice["message"]["content"]
     try:
         return json.loads(content)
     except (TypeError, json.JSONDecodeError) as error:
+        finish_reason = choice.get("finish_reason", "unknown")
         raise RuntimeError(
-            f"Groq returned invalid JSON: {str(content)[:500]}"
+            f"Groq returned invalid JSON (finish_reason={finish_reason}): "
+            f"{str(content)[:500]}"
         ) from error
 
 
-def make_summary_prompt(activity, old_memory):
+def make_keyword_prompt(activity, previous_keywords):
     return f"""
-Analyze this browser session metadata.
+Extract the most useful visual keywords from this browser activity metadata.
 
-RECENT ACTIVITY:
+ACTIVITY:
 {json.dumps(activity, ensure_ascii=False, indent=2)}
 
-EXISTING VISUAL MEMORY:
-{json.dumps(old_memory[-12:], ensure_ascii=False, indent=2)}
+PREVIOUS WALLPAPER KEYWORDS:
+{json.dumps(previous_keywords, ensure_ascii=False)}
 
-Return JSON with exactly these fields:
+Return only this JSON:
 {{
-  "summary": "2-4 sentence summary of what the user explored",
-  "topics": ["..."],
-  "projects": ["..."],
-  "visual_motifs": ["..."],
-  "mood": "short phrase",
-  "new_world_elements": ["..."],
-  "preserve_elements": ["..."]
+    "keywords": ["up to 12 short, concrete keywords copied from titles"]
 }}
 
 Rules:
-- Infer cautiously from domains and titles.
-- Do not invent personal facts.
-- Keep visual motifs concrete.
-- preserve_elements should reference broad visual continuity, not sensitive data.
+- Copy important names and search subjects exactly; do not replace them with broad categories.
+- Prefer subjects such as "Batman" or "Hulk" over website names such as "Google".
+- Keep useful previous wallpaper keywords when they fit the new activity, so the visual world has continuity.
+- Do not invent details or include URLs.
+- Keep each keyword short and the list within the limit.
 """
 
 
-def make_image_prompt(summary_obj, old_memory):
-    return f"""
-Create a cinematic desktop wallpaper prompt from a user's evolving visual memory.
-
-CURRENT MEMORY:
-{json.dumps(summary_obj, ensure_ascii=False, indent=2)}
-
-PREVIOUS MEMORY:
-{json.dumps(old_memory[-8:], ensure_ascii=False, indent=2)}
-
-The image should feel like ONE persistent world that has evolved, not a collage.
-Blend today's interests into the existing world.
-No text, letters, UI, logos, watermarks, readable screens, or recognizable copyrighted
-characters. Use symbolic visual metaphors rather than literal browser screenshots.
-
-Return JSON:
-{{
-    "statements": [
-        "statement 1: the main environment or composition",
-        "statement 2: the visual subjects, motifs, and colors",
-        "statement 3: the cinematic lighting, style, and atmosphere"
-    ],
-  "negative_prompt": "one detailed negative prompt"
-}}
-
-Rules:
-- Return exactly 3 statements.
-- Each statement must be one concise sentence of at most 25 words.
-- The three statements must describe one coherent image, not separate scenes.
-- Do not include text, letters, logos, UI, watermarks, or copyrighted characters.
-"""
+def make_image_prompt(keywords):
+        joined = ", ".join(keywords)
+        return (
+                "desktop wallpaper inspired by these subjects: "
+                f"{joined}. Create one coherent, imaginative scene with strong visual "
+                "storytelling, rich colors, and no text, letters, logos, UI, or watermark."
+        )
 
 
 def huggingface_generate(prompt, negative):
@@ -465,22 +514,30 @@ async def generate_wallpaper(force=False):
     if not events:
         raise HTTPException(400, "No new browser activity since the last generation.")
 
-    compact = compact_activity(events)
-    old = all_visual_memory()
+    compact = compact_activity(events[-20:])
+    previous_keywords = latest_memory_keywords()
 
-    summary = await groq_json(make_summary_prompt(compact, old))
-    visual = await groq_json(make_image_prompt(summary, old))
+    keyword_result = await groq_json(make_keyword_prompt(compact, previous_keywords))
+    keywords = keyword_result.get("keywords", [])
+    if not isinstance(keywords, list):
+        raise RuntimeError("Groq returned invalid keywords.")
+    keywords = [keyword.strip() for keyword in keywords if isinstance(keyword, str) and keyword.strip()]
+    search_terms = observed_search_terms(compact)
+    keyword_names = set()
+    merged_keywords = []
+    for keyword in search_terms + keywords + previous_keywords:
+        normalized = keyword.lower()
+        if normalized not in keyword_names:
+            merged_keywords.append(keyword)
+            keyword_names.add(normalized)
+    keywords = merged_keywords[:12]
+    if not keywords:
+        raise RuntimeError("Groq returned no visual keywords.")
 
-    statements = visual.get("statements")
-    if not isinstance(statements, list) or len(statements) != 3:
-        raise RuntimeError("Groq must return exactly 3 image prompt statements.")
-    if not all(isinstance(statement, str) and statement.strip() for statement in statements):
-        raise RuntimeError("Groq returned an invalid image prompt statement.")
-
-    image_prompt = " ".join(statement.strip() for statement in statements)
+    image_prompt = make_image_prompt(keywords)
     image_bytes = huggingface_generate(
         image_prompt,
-        visual.get("negative_prompt", "text, watermark, logo, UI, blurry"),
+        "text, letters, logos, UI, watermark, readable screens, blurry, low quality",
     )
 
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -497,10 +554,10 @@ async def generate_wallpaper(force=False):
             "INSERT INTO memories(created_at,summary,visual_memory) VALUES(?,?,?)",
             (
                 now(),
-                summary.get("summary", ""),
+                f"Visual keywords: {', '.join(keywords)}",
                 json.dumps(
                     {
-                        **summary,
+                        "keywords": keywords,
                         "generated_prompt": image_prompt,
                     },
                     ensure_ascii=False,
@@ -521,7 +578,7 @@ async def generate_wallpaper(force=False):
         set_windows_wallpaper(path)
 
     return {
-        "summary": summary,
+        "summary": {"keywords": keywords},
         "visual_prompt": image_prompt,
         "image_path": str(path),
     }
