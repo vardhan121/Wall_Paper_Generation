@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8765";
+const API_LABEL = API.replace(/^https?:\/\//, "").replace(/\/$/, "");
 type Stats = { activity_count: number; memory_count: number; generation_count: number; last_generation: number };
 type Memory = { id: number; created_at: number; summary: string };
 
@@ -26,7 +27,7 @@ export default function Home() {
   useEffect(() => {
     Promise.all([fetch(`${API}/api/stats`).then((response) => response.json()), fetch(`${API}/api/memory`).then((response) => response.json())])
       .then(([nextStats, nextMemories]) => { setStats(nextStats); setMemories(nextMemories); })
-      .catch(() => setMessage("Start the local service to connect your archive."));
+      .catch(() => setMessage("The archive service is unavailable."));
   }, [refreshKey]);
 
   async function generate() {
@@ -50,6 +51,6 @@ export default function Home() {
     </section>
     <section className="border-y border-[var(--line)] py-5"><div className="grid grid-cols-2 gap-5 sm:grid-cols-4">{metrics.map(([label, value, Icon], index) => <div key={label} className={`${index ? "border-l border-[var(--line)] pl-5" : ""}`}><Icon size={15} className="mb-3 text-[var(--coral)]" /><p className="font-mono text-[10px] uppercase tracking-widest text-stone-500">{label}</p><p className="mt-1 text-xl font-medium">{value}</p></div>)}</div></section>
     <section className="grid gap-8 py-14 lg:grid-cols-[.8fr_1.2fr]"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-[var(--coral)]">01 / Visual memory</p><h2 className="mt-3 font-serif text-4xl tracking-[-.03em]">What the archive is carrying</h2><p className="mt-4 max-w-sm leading-7 text-stone-600">A compact, evolving record of themes and moods. The model sees browser metadata, never page contents.</p></div><div className="space-y-3">{memories.length ? memories.slice().reverse().map((memory, index) => <motion.div initial={{ opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: index * .08 }} key={memory.id} className="border-b border-[var(--line)] py-4"><div className="flex items-baseline justify-between gap-4"><span className="font-mono text-[10px] uppercase tracking-widest text-stone-400">Fragment {String(memories.length - index).padStart(2, "0")}</span><span className="font-mono text-[10px] text-stone-400">{formatDate(memory.created_at)}</span></div><p className="mt-2 text-lg leading-7">{memory.summary}</p></motion.div>) : <div className="border border-dashed border-[var(--line)] p-8 text-center font-mono text-xs uppercase tracking-widest text-stone-500">No memory fragments yet</div>}</div></section>
-    <footer className="flex flex-col gap-2 border-t border-[var(--line)] pt-5 font-mono text-[10px] uppercase tracking-widest text-stone-400 sm:flex-row sm:justify-between"><span>Local first / Always yours</span><span>127.0.0.1:8765</span></footer>
+    <footer className="flex flex-col gap-2 border-t border-[var(--line)] pt-5 font-mono text-[10px] uppercase tracking-widest text-stone-400 sm:flex-row sm:justify-between"><span>Local first / Always yours</span><span>{API_LABEL}</span></footer>
   </main>;
 }
