@@ -1,12 +1,14 @@
 # Memory Wallpaper
 
-Memory Wallpaper is a privacy-first Chrome/Chromium extension and local Windows service that turns browser activity into an evolving desktop wallpaper.
+Memory Wallpaper is a local-first Chrome/Chromium extension and Windows helper that turns browser activity into an evolving desktop wallpaper.
 
 The project has three parts:
 
 - `extension/`: records active-tab metadata and sends it to the local backend.
-- `backend/`: stores activity and visual memory in SQLite, asks Groq for concise keywords, asks Hugging Face for an image, and applies the image as the Windows wallpaper.
+- `backend/`: stores compact browser metadata in SQLite, sends selected metadata to Groq for keyword extraction, sends the generated prompt to Hugging Face for image generation, and applies the image as the Windows wallpaper.
 - `frontend/`: a Next.js dashboard for stats, stored memories, the latest wallpaper, and manual generation.
+
+This app is not fully private because browser metadata and extracted keyword prompts are processed by cloud AI services. It does reduce the data sent to those services by keeping only metadata and not full page contents.
 
 ## How it works
 
@@ -36,7 +38,7 @@ Each generation uses recent activity plus the latest stored keyword memory:
 6. The merged keywords become the Stable Diffusion prompt.
 7. The generated image is validated, saved under `backend/data/wallpapers`, recorded in SQLite, and applied on Windows.
 
-No page body, form input, cookies, passwords, downloads, keystrokes, or screenshots are collected.
+No page body, form input, cookies, passwords, downloads, keystrokes, or screenshots are collected locally. However, selected page metadata such as URL paths, domains, titles, and duration is sent to Groq, and the generated image prompt is sent to Hugging Face.
 
 ## Requirements
 
@@ -161,6 +163,8 @@ The Next.js dashboard can be deployed separately on Vercel or another Node-compa
 
 Hosting only the frontend does not host the backend, database, extension activity, or Windows wallpaper application. The default extension still requires the local backend at `127.0.0.1:8765`.
 
-## Security notes
+## Security and privacy notes
 
+- This is not end-to-end private or fully local. Browser metadata is sent to cloud inference services.
+- The app minimizes exposure by storing compact metadata locally and by avoiding full page content, form inputs, cookies, tokens, and raw browsing bodies.
 - The default backend binds to localhost and accepts the local dashboard plus Chrome extension origins.
