@@ -1,55 +1,87 @@
 # Memory Wallpaper
 
-Memory Wallpaper is a local-first Chrome/Chromium extension and Windows helper that turns browser activity into an evolving desktop wallpaper.
+> I built a wallpaper that remembers what I browse and turns it into art.
 
-The project has three parts:
+Memory Wallpaper is a local-first Chrome/Chromium extension, FastAPI backend, and
+Next.js dashboard that transforms browser activity into an evolving Windows
+desktop wallpaper.
 
-- `extension/`: records active-tab metadata and sends it to the local backend.
-- `backend/`: stores compact browser metadata in SQLite, sends selected metadata to Groq for keyword extraction, sends the generated prompt to Hugging Face for image generation, and applies the image as the Windows wallpaper.
-- `frontend/`: a Next.js dashboard for stats, stored memories, the latest wallpaper, and manual generation.
+It is a playful visual diary: the extension records lightweight browsing
+metadata, Groq turns that metadata into visual keywords and then a polished
+image prompt, and Hugging Face generates the wallpaper.
 
-This app is not fully private because browser metadata and extracted keyword prompts are processed by cloud AI services. It does reduce the data sent to those services by keeping only metadata and not full page contents.
+## What it does
+
+- Tracks active-tab metadata such as title, domain, URL path, and time spent.
+- Removes URL query strings and fragments before local storage.
+- Extracts meaningful visual keywords with Groq.
+- Asks Groq to compose the final image prompt from only those keywords.
+- Generates a PNG through Hugging Face inference.
+- Applies the image as the Windows desktop wallpaper.
+- Stores compact memory records and generated prompts in local SQLite.
+- Shows activity, memory fragments, prompts, and the latest wallpaper in a dashboard.
 
 ## How it works
 
 ```text
-Browser tab metadata
-        |
-        v
-Chrome extension -> FastAPI backend -> SQLite memory
-                              |
-                              v
-                    Groq keyword extraction
-                              |
-                              v
-                 Hugging Face image generation
-                              |
-                              v
-                 Saved wallpaper + Windows desktop
+Browser activity
+      |
+      v
+Chrome extension
+      |
+      v
+FastAPI backend -> SQLite memory
+      |
+      +-> Groq: extract visual keywords
+      |
+      +-> Groq: write the final image prompt
+                   |
+                   v
+          Hugging Face image generation
+                   |
+                   v
+        Saved PNG -> Windows wallpaper
 ```
 
-Each generation uses recent activity plus the latest stored keyword memory:
+Each generation:
 
-1. The extension sends URL path, domain, title, start time, and duration.
-2. The backend removes query strings and fragments before storing URLs.
-3. The backend sends compact activity metadata and the latest memory keywords to Groq.
-4. Groq returns a small JSON object containing visual keywords.
-5. The backend merges exact Google search subjects, Groq keywords, and previous keywords.
-6. The merged keywords become the Stable Diffusion prompt.
-7. The generated image is validated, saved under `backend/data/wallpapers`, recorded in SQLite, and applied on Windows.
+1. Collects recent activity from the local database.
+2. Sends compact metadata and previous keywords to Groq.
+3. Merges exact search subjects, Groq keywords, and useful previous keywords.
+4. Sends those keywords back to Groq with strict instructions not to invent
+   unrelated subjects.
+5. Sends Groq's final prompt to Hugging Face.
+6. Validates and saves the returned image.
+7. Records the keywords and the exact prompt sent to Hugging Face.
 
-No page body, form input, cookies, passwords, downloads, keystrokes, or screenshots are collected locally. However, selected page metadata such as URL paths, domains, titles, and duration is sent to Groq, and the generated image prompt is sent to Hugging Face.
+## Privacy
+
+This project is local-first, not fully local or end-to-end private.
+
+The extension and database do not collect page bodies, form inputs, cookies,
+passwords, downloads, keystrokes, or screenshots. It ignores browser-internal
+pages and removes URL query strings and fragments.
+
+Selected metadata, including page titles, domains, URL paths, and durations, is
+sent to Groq for keyword and prompt generation. The final image prompt is sent
+to Hugging Face. Review the policies of those providers before using the
+project with sensitive browsing activity.
+
+The backend binds to `127.0.0.1` by default, and API keys remain in the backend
+environment rather than the frontend.
 
 ## Requirements
 
 - Windows 10 or 11 for automatic wallpaper application
 - Chrome or another Chromium-based browser
 - Python 3.11 or newer
-- Node.js and npm for the dashboard
+- Node.js and npm
 - A Groq API key
 - A Hugging Face token with inference permission
 
-## Backend setup
+## Installation
+
+### 1. Configure the backend
 
 From PowerShell at the repository root:
 
@@ -61,7 +93,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-Open `backend/.env` and replace the placeholder values:
+Edit `backend/.env`:
 
 ```text
 GROQ_API_KEY=your-groq-key
@@ -70,7 +102,8 @@ HUGGINGFACE_API_KEY=your-huggingface-token
 
 Keep `.env` private. It is ignored by Git.
 
-The provider URLs, model names, generation interval, retention limits, and image dimensions are configured in `backend/config.json`.
+Provider URLs, model names, generation intervals, retention limits, and image
+dimensions are configured in `backend/config.json`.
 
 Start the backend from inside `backend`:
 
@@ -80,30 +113,20 @@ python server.py
 
 The local API listens at `http://127.0.0.1:8765`.
 
-The backend files are organized as follows:
+### 2. Load the browser extension
 
-- `server.py`: FastAPI routes and automatic scheduler
-- `config.py`: paths and JSON configuration
-- `models.py`: request validation models
-- `database.py`: SQLite connections, memory, retention, and queries
-- `activity.py`: privacy sanitization, compaction, and search-term extraction
-- `providers.py`: Groq, Hugging Face, and Windows integrations
-- `generation.py`: keyword-to-wallpaper workflow
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Select **Load unpacked**.
+4. Choose the repository's `extension` folder.
+5. Pin the extension if desired.
 
-## Browser extension
+The extension sends activity only to the local backend at
+`http://127.0.0.1:8765`. Events shorter than two seconds are discarded.
 
-1. Start the backend.
-2. Open `chrome://extensions`.
-3. Enable **Developer mode**.
-4. Select **Load unpacked**.
-5. Choose the repository's `extension` folder.
-6. Pin the extension if desired.
+### 3. Start the dashboard
 
-The extension sends data only to `http://127.0.0.1:8765`. It ignores browser-internal pages such as `chrome://`, `edge://`, and extension pages. Events shorter than two seconds are discarded.
-
-## Frontend dashboard
-
-Run the dashboard in a second terminal:
+In a second terminal:
 
 ```powershell
 cd frontend
@@ -111,25 +134,49 @@ npm install
 npm run dev
 ```
 
-Open `http://localhost:3000`.
+Open [http://localhost:3000](http://localhost:3000).
 
-The dashboard uses `http://127.0.0.1:8765` by default. To point it at another backend, create `frontend/.env.local`:
+The dashboard uses `http://127.0.0.1:8765` by default. To use another backend,
+create `frontend/.env.local`:
 
 ```text
 NEXT_PUBLIC_API_URL=https://your-backend.example.com
 ```
 
-This variable is public and must contain only the backend URL. Never put Groq or Hugging Face keys in a `NEXT_PUBLIC_*` variable.
+Never put Groq or Hugging Face credentials in a `NEXT_PUBLIC_*` variable.
 
 ## Generate a wallpaper
 
-After browsing for a while, use the dashboard button or call the API:
+Browse normally for a while, then use **Generate next wallpaper** in the
+dashboard. You can also call the API:
 
 ```powershell
 Invoke-RestMethod http://127.0.0.1:8765/api/generate -Method POST
 ```
 
-Automatic generation is enabled by the backend scheduler. The default threshold is 30 minutes of accumulated new activity. Change `generation_interval_minutes` in `backend/config.json` to adjust it.
+Automatic generation is enabled by the backend scheduler. The default
+threshold is 30 minutes of accumulated new activity. Adjust
+`generation_interval_minutes` in `backend/config.json` if needed.
+
+## Project structure
+
+```text
+extension/
+  background.js     Activity tracking and batching
+  manifest.json     Chrome extension configuration
+  options.html      Extension settings page
+
+backend/
+  server.py         FastAPI routes and scheduler
+  generation.py     Keyword-to-prompt-to-wallpaper workflow
+  activity.py       Sanitization, compaction, and search-term extraction
+  database.py       SQLite storage, memory, and retention
+  providers.py      Groq, Hugging Face, and Windows integrations
+  config.json       Runtime configuration
+
+frontend/
+  src/app/page.tsx  Dashboard UI
+```
 
 ## API
 
@@ -137,7 +184,7 @@ Automatic generation is enabled by the backend scheduler. The default threshold 
 | --- | --- | --- |
 | `GET` | `/api/health` | Provider and service information |
 | `GET` | `/api/stats` | Activity, memory, and generation counts |
-| `GET` | `/api/memory` | Stored visual memory records |
+| `GET` | `/api/memory` | Stored memories and generated prompts |
 | `GET` | `/api/memory/tokens` | Estimated stored-memory token usage |
 | `GET` | `/api/wallpaper/latest` | Latest generated PNG |
 | `POST` | `/api/activity` | Accept an extension activity batch |
@@ -145,26 +192,60 @@ Automatic generation is enabled by the backend scheduler. The default threshold 
 
 ## Storage and retention
 
-Runtime data is kept in `backend/data/`:
+Runtime data is stored in `backend/data/`:
 
-- `memory.db`: SQLite database containing activity, memories, and generation records
+- `memory.db`: activity, visual memory, and generation records
 - `wallpapers/`: generated PNG files
 
-By default, the backend retains the newest 200 activity records, 20 memory records, and 10 generations. Older wallpaper files are deleted when their generation records are pruned. Do not delete `backend/data` unless you intentionally want to erase the local history and generated wallpapers.
+The default limits are:
 
-## Hosting the frontend
+- 200 activity records
+- 20 memory records
+- 10 generation records
 
-The Next.js dashboard can be deployed separately on Vercel or another Node-compatible host:
+Older records and their wallpaper files are pruned automatically. Delete
+`backend/data` only when you intentionally want to erase local history and
+generated wallpapers.
 
-1. Set the project root to `frontend`.
-2. Use the existing `npm run build` command.
-3. Set `NEXT_PUBLIC_API_URL` to a public HTTPS backend URL.
-4. Update backend CORS to allow the deployed frontend origin.
+## Development
 
-Hosting only the frontend does not host the backend, database, extension activity, or Windows wallpaper application. The default extension still requires the local backend at `127.0.0.1:8765`.
+Backend dependencies are pinned in `backend/requirements.txt`.
+
+Frontend commands:
+
+```powershell
+cd frontend
+npm run lint
+npm run build
+```
+
+The frontend can be deployed separately, but a deployed dashboard still needs
+an accessible backend and an updated CORS configuration. The default extension
+continues to require the local backend at `127.0.0.1:8765`.
 
 ## Security and privacy notes
 
 - This is not end-to-end private or fully local. Browser metadata is sent to cloud inference services.
 - The app minimizes exposure by storing compact metadata locally and by avoiding full page content, form inputs, cookies, tokens, and raw browsing bodies.
 - The default backend binds to localhost and accepts the local dashboard plus Chrome extension origins.
+
+## Contributing
+
+Ideas and contributions are welcome. Useful directions include:
+
+- macOS and Linux wallpaper support
+- additional image providers
+- more visual styles and prompt controls
+- improved activity filtering
+- dashboard prompt history and export
+- tests and documentation improvements
+
+For changes, please explain the user-facing behavior, keep provider keys out
+of commits, and verify the relevant backend or frontend command before opening
+a pull request.
+
+## License
+
+No license has been specified yet. If you plan to publish or accept
+contributions, add a license that matches how you want others to use the
+project.
