@@ -48,11 +48,63 @@ Rules:
 
 
 def make_image_prompt(keywords):
-    joined = ", ".join(keywords)
+    normalized = []
+    seen = set()
+    for keyword in keywords:
+        if not isinstance(keyword, str):
+            continue
+        value = keyword.strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if lowered not in seen:
+            normalized.append(value)
+            seen.add(lowered)
+
+    joined = ", ".join(normalized)
+    return f"""
+Rewrite these keywords into one final image prompt.
+
+KEYWORDS:
+{joined}
+
+Strict rules:
+- Use ONLY the provided keywords as the subject matter.
+- Do not invent or add any new character, object, or celebrity name unless it already appears in the keyword list.
+- Do not add Batman, ChatGPT, Hugging Face, or any other extra subject unless it is explicitly present in the keywords.
+- Keep the scene coherent and visually clear, with a cozy, colorful cartoon wallpaper mood.
+- Include the keywords naturally in one scene, but do not add unrelated named elements.
+- Do not include text, letters, logos, UI, watermark, or readable screens.
+- Return only valid JSON in this exact format:
+  {{"prompt": "<final image prompt>"}}
+"""
+
+
+def build_keyword_prompt_from_keywords(keywords):
+    cleaned = []
+    seen = set()
+    for keyword in keywords:
+        if not isinstance(keyword, str):
+            continue
+        value = keyword.strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if lowered not in seen:
+            cleaned.append(value)
+            seen.add(lowered)
+
+    if not cleaned:
+        return (
+            "Cozy wallpaper scene, colorful cartoon style, vibrant colors, playful and adorable, "
+            "high quality illustration, no text, no logos, no UI, no watermark."
+        )
+
+    joined = ", ".join(cleaned)
     return (
-        "desktop wallpaper inspired by these subjects: "
-        f"{joined}. Create one coherent, imaginative scene with strong visual "
-        "storytelling, rich colors, and no text, letters, logos, UI, or watermark."
+        f"Cozy wallpaper scene featuring {joined}. Use these subjects exactly as the main elements of one "
+        "coherent, colorful cartoon illustration. Warm ambient lighting, vibrant colors, playful mood, "
+        "high quality illustration, rich details, no text, no letters, no logos, no UI, no watermark."
     )
 
 
@@ -88,7 +140,25 @@ async def generate_wallpaper(force=False):
     if not keywords:
         raise RuntimeError("Groq returned no visual keywords.")
 
-    image_prompt = make_image_prompt(keywords)
+    image_prompt_result = await groq_json(make_image_prompt(keywords))
+    image_prompt = image_prompt_result.get("prompt") or image_prompt_result.get("image_prompt")
+
+    if not isinstance(image_prompt, str) or not image_prompt.strip():
+        image_prompt = build_keyword_prompt_from_keywords(keywords)
+    else:
+        lowered_keywords = {str(keyword).strip().lower() for keyword in keywords if isinstance(keyword, str) and keyword.strip()}
+        forbidden = [
+            "batman",
+            "chatgpt",
+            "hugging face",
+            "huggingface",
+            "doctor",
+            "doctore",
+            "trump",
+        ]
+        lower_prompt = image_prompt.lower()
+        if any(term in lower_prompt for term in forbidden) and not any(term in lowered_keywords for term in forbidden):
+            image_prompt = build_keyword_prompt_from_keywords(keywords)
     image_bytes = huggingface_generate(
         image_prompt,
         "text, letters, logos, UI, watermark, readable screens, blurry, low quality",

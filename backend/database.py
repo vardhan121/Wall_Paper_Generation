@@ -73,7 +73,16 @@ def all_visual_memory() -> list[dict[str, Any]]:
             "SELECT * FROM memories ORDER BY created_at ASC"
         ).fetchall()
         conn.close()
-    return [dict(row) for row in rows]
+
+    memories = []
+    for row in rows:
+        entry = dict(row)
+        try:
+            entry["visual_memory"] = json.loads(entry["visual_memory"])
+        except (TypeError, json.JSONDecodeError):
+            entry["visual_memory"] = {"keywords": [], "generated_prompt": ""}
+        memories.append(entry)
+    return memories
 
 
 def latest_memory_keywords() -> list[str]:
